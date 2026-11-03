@@ -33,6 +33,8 @@ import {
     getInhibitorAppId,
     getInhibitorIds,
     getInhibitorReason,
+    inhibit,
+    uninhibit,
 } from "./lib.js";
 
 class Indicator extends PanelMenu.Button {
@@ -43,9 +45,11 @@ class Indicator extends PanelMenu.Button {
     protected _menuItems: PopupMenu.PopupMenuItem[] = [];
     protected _path: string;
     protected _icon: St.Icon | null;
-    protected _iconYes: Gio.Icon | null;
-    protected _iconNo: Gio.Icon | null;
-    protected _iconUnknown: Gio.Icon | null;
+    protected _iconYes: St.Icon["gicon"] | null;
+    protected _iconNo: St.Icon["gicon"] | null;
+    protected _iconUnknown: St.Icon["gicon"] | null;
+    protected _manualInhibitSwitch: PopupMenu.PopupSwitchMenuItem;
+    protected _inhibitorSection: PopupMenu.PopupMenuSection;
     // Make tsc stop complaining about PopupDummyMenu not having certain members
     declare menu: PopupMenu.PopupMenu<PopupMenu.PopupMenu.SignalMap>;
     protected _extension: InhibitionIndicatorExtension | null;
@@ -61,16 +65,28 @@ class Indicator extends PanelMenu.Button {
         this._icon = new St.Icon({ style_class: "system-status-icon" });
         this._iconYes = Gio.icon_new_for_string(
             this._path + "/assets/zzz-yes.svg",
-        );
+        ) as unknown as St.Icon["gicon"];
         this._iconNo = Gio.icon_new_for_string(
             this._path + "/assets/zzz-no.svg",
-        );
+        ) as unknown as St.Icon["gicon"];
         this._iconUnknown = Gio.icon_new_for_string(
             this._path + "/assets/zzz-unknown.svg",
-        );
+        ) as unknown as St.Icon["gicon"];
 
         this._icon.gicon = this._iconUnknown;
         this.add_child(this._icon);
+
+        this._manualInhibitSwitch = new PopupMenu.PopupSwitchMenuItem(
+            _("Keep Awake"),
+            extension.manualInhibitionEnabled,
+        );
+        this._manualInhibitSwitch.connect("toggled", (_item, enabled) => {
+            extension.setManualInhibition(enabled);
+        });
+        this.menu.addMenuItem(this._manualInhibitSwitch);
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._inhibitorSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._inhibitorSection);
 
         const handler_id = extension.settings?.connect(
             "changed::hide-indicator-when-not-inhibited",
@@ -104,10 +120,7 @@ class Indicator extends PanelMenu.Button {
     }
 
     clearInhibitors() {
-        this.menu.removeAll();
-
-        // no need to call "destroy()" on the menu items
-        // because "menu.removeAll()" already done so
+        this._inhibitorSection.removeAll();
 
         this._menuItems = [];
     }
@@ -115,7 +128,11 @@ class Indicator extends PanelMenu.Button {
     addInhibitor(inhibitor: string) {
         const item = new PopupMenu.PopupMenuItem(inhibitor);
         this._menuItems.push(item);
-        this.menu.addMenuItem(item);
+        this._inhibitorSection.addMenuItem(item);
+    }
+
+    setManualInhibitionState(enabled: boolean) {
+        this._manualInhibitSwitch.setToggleState(enabled);
     }
 
     destroy() {
@@ -136,19 +153,38 @@ class Indicator extends PanelMenu.Button {
 export default class InhibitionIndicatorExtension extends Extension {
     protected _settings: Gio.Settings | null = null;
     protected _indicator: Indicator | null = null;
+    protected _settingsHandlerIds: number[] = [];
+    protected _refreshGeneration = 0;
+    protected _enabled = false;
+    protected _manualInhibitionRequested = false;
+    protected _manualInhibitCookie: number | null = null;
+    protected _manualInhibitQueue: Promise<void> = Promise.resolve();
 
     get settings() {
         return this._settings;
     }
 
+    get manualInhibitionEnabled() {
+        return this._manualInhibitCookie !== null;
+    }
+
     enable() {
+        this._enabled = true;
         this._settings = this.getSettings();
 
-        const positioningSettings = ["enable-positioning", "position-box", "position-number"];
+        const positioningSettings = [
+            "enable-positioning",
+            "position-box",
+            "position-number",
+        ];
         for (const setting of positioningSettings) {
-            this.settings?.connect(`changed::${setting}`, () =>
-                this._handlePositioningChanged(),
+            const handlerId = this.settings?.connect(
+                `changed::${setting}`,
+                () => this._handlePositioningChanged(),
             );
+            if (handlerId) {
+                this._settingsHandlerIds.push(handlerId);
+            }
         }
 
         this.createIndicator();
@@ -198,6 +234,26 @@ export default class InhibitionIndicatorExtension extends Extension {
     }
 
     disable() {
+        this._enabled = false;
+        this._manualInhibitionRequested = false;
+        this._refreshGeneration++;
+        for (const handlerId of this._settingsHandlerIds) {
+            this._settings?.disconnect(handlerId);
+        }
+        this._settingsHandlerIds = [];
+        this._manualInhibitQueue = this._manualInhibitQueue
+            .then(async () => {
+                const cookie = this._manualInhibitCookie;
+                if (cookie !== null) {
+                    await uninhibit(cookie);
+                    if (this._manualInhibitCookie === cookie) {
+                        this._manualInhibitCookie = null;
+                    }
+                }
+            })
+            .catch((error) => {
+                console.error("Failed to release manual inhibitor:", error);
+            });
         cleanUp();
         this.destroyIndicator();
         this._settings = null;
@@ -210,36 +266,101 @@ export default class InhibitionIndicatorExtension extends Extension {
         }
     }
 
-    async updateInhibitors() {
-        let objPaths;
-        try {
-            objPaths = await getInhibitorIds();
-            const inhibited = !!objPaths.length;
+    setManualInhibition(enabled: boolean) {
+        if (!this._enabled) {
+            return;
+        }
 
-            if (!this._indicator) {
+        this._manualInhibitionRequested = enabled;
+        this._manualInhibitQueue = this._manualInhibitQueue
+            .then(async () => {
+                if (!this._enabled) {
+                    return;
+                }
+
+                if (this._manualInhibitionRequested) {
+                    if (this._manualInhibitCookie === null) {
+                        const cookie = await inhibit(
+                            this.uuid,
+                            _("Manual keep-awake request"),
+                        );
+                        this._manualInhibitCookie = cookie;
+
+                        if (
+                            !this._enabled ||
+                            !this._manualInhibitionRequested
+                        ) {
+                            await uninhibit(cookie);
+                            if (this._manualInhibitCookie === cookie) {
+                                this._manualInhibitCookie = null;
+                            }
+                        }
+                    }
+                } else if (this._manualInhibitCookie !== null) {
+                    const cookie = this._manualInhibitCookie;
+                    await uninhibit(cookie);
+                    if (this._manualInhibitCookie === cookie) {
+                        this._manualInhibitCookie = null;
+                    }
+                }
+            })
+            .then(() => {
+                this._indicator?.setManualInhibitionState(
+                    this._manualInhibitCookie !== null,
+                );
+            })
+            .catch((error) => {
+                console.error("Failed to update manual inhibitor:", error);
+                this._indicator?.setManualInhibitionState(
+                    this._manualInhibitCookie !== null,
+                );
+            });
+    }
+
+    async updateInhibitors() {
+        const generation = ++this._refreshGeneration;
+        try {
+            const objPaths = await getInhibitorIds();
+
+            if (generation !== this._refreshGeneration || !this._indicator) {
                 return;
             }
 
+            const inhibited = objPaths.length > 0;
             this._indicator.updateStatus(inhibited);
             this._indicator.clearInhibitors();
 
-            if (inhibited) {
-                const promises = objPaths.map((objPath) =>
-                    Promise.all([
-                        getInhibitorAppId(objPath),
-                        getInhibitorReason(objPath),
-                    ]),
-                );
-                const inhibitors = await Promise.all(promises);
-                if (!this._indicator) {
-                    return;
-                }
-                for (const [appId, reason] of inhibitors) {
-                    this._indicator.addInhibitor(appId + ": " + reason);
+            const inhibitors = await Promise.all(
+                objPaths.map(async (objPath) => {
+                    try {
+                        const [appId, reason] = await Promise.all([
+                            getInhibitorAppId(objPath),
+                            getInhibitorReason(objPath),
+                        ]);
+                        return `${appId}: ${reason}`;
+                    } catch (error) {
+                        console.error(
+                            `Failed to read inhibitor at ${objPath}:`,
+                            error,
+                        );
+                        return null;
+                    }
+                }),
+            );
+
+            if (generation !== this._refreshGeneration || !this._indicator) {
+                return;
+            }
+
+            for (const inhibitor of inhibitors) {
+                if (inhibitor !== null) {
+                    this._indicator.addInhibitor(inhibitor);
                 }
             }
         } catch (e) {
-            console.error(e);
+            if (generation === this._refreshGeneration) {
+                console.error(e);
+            }
         }
     }
 }

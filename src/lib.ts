@@ -18,6 +18,10 @@
 "use strict";
 
 import Gio from "gi://Gio";
+import GLib from "gi://GLib";
+
+type SessionManagerParameters = Parameters<Gio.DBusConnection["call"]>[4];
+type SessionManagerReply = ReturnType<Gio.DBusConnection["call_finish"]>;
 
 let bus: Gio.DBusConnection | null;
 
@@ -29,77 +33,85 @@ function getBus(): Gio.DBusConnection {
     return bus;
 }
 
-export function getInhibitorAppId(objectPath: string): Promise<string> {
+function callSessionManager(
+    objectPath: string,
+    interfaceName: string,
+    methodName: string,
+    parameters: SessionManagerParameters = null,
+): Promise<SessionManagerReply> {
     return new Promise((resolve, reject) => {
-        getBus().call(
-            "org.gnome.SessionManager",
-            objectPath,
-            "org.gnome.SessionManager.Inhibitor",
-            "GetAppId",
-            null,
-            null,
-            Gio.DBusCallFlags.NONE,
-            -1,
-            null,
-            (conn, res) => {
-                const data = conn?.call_finish(res);
-                if (data) {
-                    resolve(data.get_child_value(0).get_string()[0]);
-                } else {
-                    reject("D-Bus call failed");
-                }
-            },
-        );
+        try {
+            getBus().call(
+                "org.gnome.SessionManager",
+                objectPath,
+                interfaceName,
+                methodName,
+                parameters,
+                null,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                null,
+                (connection, result) => {
+                    try {
+                        if (!connection) {
+                            throw new Error("D-Bus connection unavailable");
+                        }
+                        resolve(connection.call_finish(result));
+                    } catch (error) {
+                        reject(error);
+                    }
+                },
+            );
+        } catch (error) {
+            reject(error);
+        }
     });
+}
+
+export function inhibit(appId: string, reason: string): Promise<number> {
+    const flags = 4 | 8;
+    return callSessionManager(
+        "/org/gnome/SessionManager",
+        "org.gnome.SessionManager",
+        "Inhibit",
+        new GLib.Variant(
+            "(susu)",
+            [appId, 0, reason, flags],
+        ) as unknown as SessionManagerParameters,
+    ).then((data) => data.get_child_value(0).get_uint32());
+}
+
+export function uninhibit(cookie: number): Promise<void> {
+    return callSessionManager(
+        "/org/gnome/SessionManager",
+        "org.gnome.SessionManager",
+        "Uninhibit",
+        new GLib.Variant("(u)", [cookie]) as unknown as SessionManagerParameters,
+    ).then(() => undefined);
+}
+
+export function getInhibitorAppId(objectPath: string): Promise<string> {
+    return callSessionManager(
+        objectPath,
+        "org.gnome.SessionManager.Inhibitor",
+        "GetAppId",
+    ).then((data) => data.get_child_value(0).get_string()[0]);
 }
 
 export function getInhibitorReason(objectPath: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        getBus().call(
-            "org.gnome.SessionManager",
-            objectPath,
-            "org.gnome.SessionManager.Inhibitor",
-            "GetReason",
-            null,
-            null,
-            Gio.DBusCallFlags.NONE,
-            -1,
-            null,
-            (conn, res) => {
-                const data = conn?.call_finish(res);
-                if (data) {
-                    resolve(data.get_child_value(0).get_string()[0]);
-                } else {
-                    reject("D-Bus call failed");
-                }
-            },
-        );
-    });
+    return callSessionManager(
+        objectPath,
+        "org.gnome.SessionManager.Inhibitor",
+        "GetReason",
+    ).then((data) => data.get_child_value(0).get_string()[0]);
 }
 
 export function getInhibitorIds(): Promise<string[]> {
-    return new Promise((resolve, reject) => {
-        getBus().call(
-            "org.gnome.SessionManager",
-            "/org/gnome/SessionManager",
-            "org.gnome.SessionManager",
-            "GetInhibitors",
-            null,
-            null,
-            Gio.DBusCallFlags.NONE,
-            -1,
-            null,
-            (conn, res) => {
-                // data type string: (ao)
-                const data = conn?.call_finish(res);
-                if (data) {
-                    resolve(data.get_child_value(0).get_objv());
-                } else {
-                    reject("D-Bus call failed");
-                }
-            },
-        );
-    });
+    return callSessionManager(
+        "/org/gnome/SessionManager",
+        "org.gnome.SessionManager",
+        "GetInhibitors",
+    ).then((data) => data.get_child_value(0).get_objv());
 }
 
 let addedSubId: number | null = null;

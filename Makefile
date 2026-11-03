@@ -6,11 +6,11 @@ DOMAIN=monyxie.github.io
 node_modules: package.json
 	npm install
 
-lint:
+lint: node_modules
 	npm run lint
 
-js: lint node_modules
-	tsc
+js: lint
+	./node_modules/.bin/tsc
 
 schemas: src/schemas/org.gnome.shell.extensions.$(NAME).gschema.xml
 	glib-compile-schemas --strict src/schemas

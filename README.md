@@ -1,7 +1,7 @@
 Inhibition Indicator
 ===
 
-Inhibition Indicator is a Gnome Shell extension that shows the current inhibition status with a indicator icon.
+Inhibition Indicator is a GNOME Shell extension that shows which applications are preventing the system from sleeping. Its panel menu also includes a `Keep Awake` switch for manually inhibiting sleep.
 
 ![Screenshot showing Inhibition Indicator in action](screenshot.png)
 

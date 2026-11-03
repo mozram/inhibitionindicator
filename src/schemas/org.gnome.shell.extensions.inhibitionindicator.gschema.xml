@@ -13,11 +13,13 @@
         </key>
         <key name="position-box" type="i">
             <default>2</default>
+            <range min="0" max="2"/>
             <summary>Position in the panel</summary>
             <description>Position where the icon will be displayed (left/center/right)</description>
         </key>
         <key name="position-number" type="i">
-            <default>-0</default>
+            <default>0</default>
+            <range min="0" max="99"/>
             <summary>Position of the icon inside the box</summary>
             <description></description>
         </key>
