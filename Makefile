@@ -1,7 +1,7 @@
 NAME=inhibitionindicator
 DOMAIN=monyxie.github.io
 
-.PHONY: lint pack install clean veryclean js schemas dist
+.PHONY: lint pack install clean veryclean js dist
 
 node_modules: package.json
 	npm install
@@ -10,18 +10,14 @@ lint: node_modules
 	npm run lint
 
 js: lint
+	@rm -rf dist
 	./node_modules/.bin/tsc
 
-schemas: src/schemas/org.gnome.shell.extensions.$(NAME).gschema.xml
-	glib-compile-schemas --strict src/schemas
-
-dist: js schemas
-	@cp -r src/assets dist/
-	@cp -r src/schemas dist/
-	@cp src/prefs.xml dist/
+dist: js
 	@cp src/metadata.json dist/
 
 $(NAME).zip: dist
+	@rm -f $@
 	@(cd dist && zip ../$(NAME).zip -9r . -x schemas/gschemas.compiled)
 
 pack: $(NAME).zip

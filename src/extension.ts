@@ -18,151 +18,136 @@
 "use strict";
 
 import GObject from "gi://GObject";
-import St from "gi://St";
-import Gio from "gi://Gio";
 import {
     Extension,
     gettext as _,
 } from "resource:///org/gnome/shell/extensions/extension.js";
-import * as PanelMenu from "resource:///org/gnome/shell/ui/panelMenu.js";
-import * as PopupMenu from "resource:///org/gnome/shell/ui/popupMenu.js";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
+import * as PopupMenu from "resource:///org/gnome/shell/ui/popupMenu.js";
+import * as QuickSettings from "resource:///org/gnome/shell/ui/quickSettings.js";
 import {
     addInhibitorChangeListener,
     cleanUp,
     getInhibitorAppId,
+    getInhibitorFlags,
     getInhibitorIds,
     getInhibitorReason,
     inhibit,
     uninhibit,
 } from "./lib.js";
 
-class Indicator extends PanelMenu.Button {
+type InhibitorInfo = {
+    appId: string;
+    reason: string;
+};
+
+class QuickSettingsIndicator extends QuickSettings.SystemIndicator {
     static {
         GObject.registerClass(this);
     }
 
-    protected _menuItems: PopupMenu.PopupMenuItem[] = [];
-    protected _path: string;
-    protected _icon: St.Icon | null;
-    protected _iconYes: St.Icon["gicon"] | null;
-    protected _iconNo: St.Icon["gicon"] | null;
-    protected _iconUnknown: St.Icon["gicon"] | null;
-    protected _manualInhibitSwitch: PopupMenu.PopupSwitchMenuItem;
-    protected _inhibitorSection: PopupMenu.PopupMenuSection;
-    // Make tsc stop complaining about PopupDummyMenu not having certain members
-    declare menu: PopupMenu.PopupMenu<PopupMenu.PopupMenu.SignalMap>;
-    protected _extension: InhibitionIndicatorExtension | null;
-
-    protected _isInhibited: boolean = false;
-
-    protected _handler_ids: number[] = [];
+    protected _statusIcon: ReturnType<
+        QuickSettings.SystemIndicator["_addIndicator"]
+    >;
+    protected _toggle: QuickSettings.QuickMenuToggle;
+    protected _inhibitors: InhibitorInfo[] = [];
 
     constructor(extension: InhibitionIndicatorExtension) {
-        super(0.0, _("Inhibition Indicator"));
-        this._extension = extension;
-        this._path = extension.path;
-        this._icon = new St.Icon({ style_class: "system-status-icon" });
-        this._iconYes = Gio.icon_new_for_string(
-            this._path + "/assets/zzz-yes.svg",
-        ) as unknown as St.Icon["gicon"];
-        this._iconNo = Gio.icon_new_for_string(
-            this._path + "/assets/zzz-no.svg",
-        ) as unknown as St.Icon["gicon"];
-        this._iconUnknown = Gio.icon_new_for_string(
-            this._path + "/assets/zzz-unknown.svg",
-        ) as unknown as St.Icon["gicon"];
+        super();
 
-        this._icon.gicon = this._iconUnknown;
-        this.add_child(this._icon);
+        this._statusIcon = this._addIndicator();
+        this._statusIcon.icon_name = "system-suspend-symbolic";
+        this._statusIcon.visible = false;
 
-        this._manualInhibitSwitch = new PopupMenu.PopupSwitchMenuItem(
-            _("Keep Awake"),
-            extension.manualInhibitionEnabled,
-        );
-        this._manualInhibitSwitch.connect("toggled", (_item, enabled) => {
-            extension.setManualInhibition(enabled);
+        this._toggle = new QuickSettings.QuickMenuToggle({
+            title: _("Keep Awake"),
+            subtitle: _("No apps are blocking sleep"),
+            icon_name: "system-suspend-symbolic",
+            toggle_mode: true,
+            checked: extension.manualInhibitionEnabled,
         });
-        this.menu.addMenuItem(this._manualInhibitSwitch);
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._inhibitorSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._inhibitorSection);
-
-        const handler_id = extension.settings?.connect(
-            "changed::hide-indicator-when-not-inhibited",
-            () => {
-                this.updateStatus(this._isInhibited);
-            },
+        this._toggle.menu.setHeader(
+            "system-suspend-symbolic",
+            _("Sleep inhibitors"),
+            _("No apps are blocking sleep"),
         );
-        if (handler_id) {
-            this._handler_ids.push(handler_id);
-        }
+        this._toggle.connect("clicked", () => {
+            extension.setManualInhibition(this._toggle.checked);
+        });
+        this.quickSettingsItems.push(this._toggle);
     }
 
-    updateStatus(isInhibited: boolean) {
-        const gicon = isInhibited ? this._iconNo : this._iconYes;
-        if (this._icon && gicon) {
-            this._icon.gicon = gicon;
+    updateInhibitors(inhibitors: InhibitorInfo[], manualEnabled: boolean) {
+        this._inhibitors = inhibitors;
+        this._statusIcon.visible = manualEnabled || inhibitors.length > 0;
+        this._toggle.checked = manualEnabled;
+        this._toggle.subtitle = manualEnabled
+            ? _("Manual keep-awake is on")
+            : this._getSummary(inhibitors.length);
+
+        this._toggle.menu.setHeader(
+            "system-suspend-symbolic",
+            _("Sleep inhibitors"),
+            this._getSummary(inhibitors.length),
+        );
+        this._toggle.menu.removeAll();
+
+        if (inhibitors.length === 0) {
+            this._toggle.menu.addMenuItem(
+                new PopupMenu.PopupMenuItem(
+                    _("No apps are blocking sleep"),
+                    { reactive: false, can_focus: false },
+                ),
+            );
+            return;
         }
 
-        if (
-            !isInhibited &&
-            this._extension
-                ?.getSettings()
-                ?.get_boolean("hide-indicator-when-not-inhibited") === true
-        ) {
-            this.visible = false;
-        } else {
-            this.visible = true;
+        for (const inhibitor of inhibitors) {
+            const label = inhibitor.reason
+                ? `${inhibitor.appId}: ${inhibitor.reason}`
+                : inhibitor.appId;
+            this._toggle.menu.addMenuItem(
+                new PopupMenu.PopupMenuItem(label, {
+                    reactive: false,
+                    can_focus: false,
+                }),
+            );
         }
-
-        this._isInhibited = isInhibited;
-    }
-
-    clearInhibitors() {
-        this._inhibitorSection.removeAll();
-
-        this._menuItems = [];
-    }
-
-    addInhibitor(inhibitor: string) {
-        const item = new PopupMenu.PopupMenuItem(inhibitor);
-        this._menuItems.push(item);
-        this._inhibitorSection.addMenuItem(item);
     }
 
     setManualInhibitionState(enabled: boolean) {
-        this._manualInhibitSwitch.setToggleState(enabled);
+        this._statusIcon.visible = enabled || this._inhibitors.length > 0;
+        this._toggle.checked = enabled;
+        this._toggle.subtitle = enabled
+            ? _("Manual keep-awake is on")
+            : this._getSummary(this._inhibitors.length);
     }
 
     destroy() {
-        for (const handle_id of this._handler_ids) {
-            this._extension?.settings?.disconnect(handle_id);
-        }
-        this._handler_ids = [];
-        this.clearInhibitors();
-        this._icon?.destroy();
-        this._icon = null;
-        this._iconYes = null;
-        this._iconNo = null;
-        this._iconUnknown = null;
+        this._toggle.menu.destroy();
+        this._toggle.destroy();
+        this.quickSettingsItems = [];
         super.destroy();
+    }
+
+    protected _getSummary(count: number) {
+        if (count === 0) {
+            return _("No apps are blocking sleep");
+        }
+        if (count === 1) {
+            return _("1 app is blocking sleep");
+        }
+        return _("%d apps are blocking sleep").replace("%d", String(count));
     }
 }
 
 export default class InhibitionIndicatorExtension extends Extension {
-    protected _settings: Gio.Settings | null = null;
-    protected _indicator: Indicator | null = null;
-    protected _settingsHandlerIds: number[] = [];
+    protected _indicator: QuickSettingsIndicator | null = null;
     protected _refreshGeneration = 0;
     protected _enabled = false;
     protected _manualInhibitionRequested = false;
     protected _manualInhibitCookie: number | null = null;
     protected _manualInhibitQueue: Promise<void> = Promise.resolve();
-
-    get settings() {
-        return this._settings;
-    }
 
     get manualInhibitionEnabled() {
         return this._manualInhibitCookie !== null;
@@ -170,23 +155,6 @@ export default class InhibitionIndicatorExtension extends Extension {
 
     enable() {
         this._enabled = true;
-        this._settings = this.getSettings();
-
-        const positioningSettings = [
-            "enable-positioning",
-            "position-box",
-            "position-number",
-        ];
-        for (const setting of positioningSettings) {
-            const handlerId = this.settings?.connect(
-                `changed::${setting}`,
-                () => this._handlePositioningChanged(),
-            );
-            if (handlerId) {
-                this._settingsHandlerIds.push(handlerId);
-            }
-        }
-
         this.createIndicator();
 
         addInhibitorChangeListener(() => {
@@ -196,40 +164,15 @@ export default class InhibitionIndicatorExtension extends Extension {
         this.updateInhibitors();
     }
 
-    _handlePositioningChanged() {
-        this.destroyIndicator();
-        this.createIndicator();
-        this.updateInhibitors();
-    }
-
     createIndicator() {
         if (!this._indicator) {
-            this._indicator = new Indicator(this);
-
-            // uuid: inhibitionindicator@monyxie.github.io
-            if (this._settings?.get_boolean("enable-positioning")) {
-                const boxMap = {
-                    0: "left",
-                    1: "center",
-                    2: "right",
-                };
-
-                const positionNumber =
-                    this._settings?.get_int("position-number");
-                const boxNumber = this._settings?.get_int("position-box");
-                const box =
-                    boxNumber in boxMap
-                        ? boxMap[boxNumber as 0 | 1 | 2]
-                        : "right";
-                Main.panel.addToStatusArea(
-                    this.uuid,
-                    this._indicator,
-                    positionNumber,
-                    box,
-                );
-            } else {
-                Main.panel.addToStatusArea(this.uuid, this._indicator);
-            }
+            this._indicator = new QuickSettingsIndicator(this);
+            const quickSettings = Main.panel.statusArea.quickSettings;
+            quickSettings.addExternalIndicator(
+                this._indicator as unknown as Parameters<
+                    typeof quickSettings.addExternalIndicator
+                >[0],
+            );
         }
     }
 
@@ -237,10 +180,6 @@ export default class InhibitionIndicatorExtension extends Extension {
         this._enabled = false;
         this._manualInhibitionRequested = false;
         this._refreshGeneration++;
-        for (const handlerId of this._settingsHandlerIds) {
-            this._settings?.disconnect(handlerId);
-        }
-        this._settingsHandlerIds = [];
         this._manualInhibitQueue = this._manualInhibitQueue
             .then(async () => {
                 const cookie = this._manualInhibitCookie;
@@ -256,7 +195,6 @@ export default class InhibitionIndicatorExtension extends Extension {
             });
         cleanUp();
         this.destroyIndicator();
-        this._settings = null;
     }
 
     destroyIndicator() {
@@ -326,18 +264,24 @@ export default class InhibitionIndicatorExtension extends Extension {
                 return;
             }
 
-            const inhibited = objPaths.length > 0;
-            this._indicator.updateStatus(inhibited);
-            this._indicator.clearInhibitors();
-
             const inhibitors = await Promise.all(
                 objPaths.map(async (objPath) => {
                     try {
-                        const [appId, reason] = await Promise.all([
+                        const [appId, reason, flags] = await Promise.all([
                             getInhibitorAppId(objPath),
                             getInhibitorReason(objPath),
+                            getInhibitorFlags(objPath),
                         ]);
-                        return `${appId}: ${reason}`;
+                        if (
+                            appId === this.uuid ||
+                            (flags & (4 | 8)) === 0
+                        ) {
+                            return null;
+                        }
+                        return {
+                            appId: appId || _("Unknown application"),
+                            reason,
+                        };
                     } catch (error) {
                         console.error(
                             `Failed to read inhibitor at ${objPath}:`,
@@ -352,11 +296,13 @@ export default class InhibitionIndicatorExtension extends Extension {
                 return;
             }
 
-            for (const inhibitor of inhibitors) {
-                if (inhibitor !== null) {
-                    this._indicator.addInhibitor(inhibitor);
-                }
-            }
+            this._indicator.updateInhibitors(
+                inhibitors.filter(
+                    (inhibitor): inhibitor is InhibitorInfo =>
+                        inhibitor !== null,
+                ),
+                this.manualInhibitionEnabled,
+            );
         } catch (e) {
             if (generation === this._refreshGeneration) {
                 console.error(e);

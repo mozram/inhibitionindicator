@@ -1,6 +1,6 @@
 {
     "name": "Inhibition Indicator",
-    "description": "Indicates whether the system is prevented from sleeping by programs.",
+    "description": "Shows applications preventing sleep and lets you keep the system awake manually.",
     "uuid": "inhibitionindicator@monyxie.github.io",
     "shell-version": [
         "45",
@@ -10,6 +10,5 @@
         "49"
     ],
     "gettext-domain": "inhibitionindicator@monyxie.github.io",
-    "url": "https://github.com/monyxie/inhibitionindicator",
-    "settings-schema": "org.gnome.shell.extensions.inhibitionindicator"
+    "url": "https://github.com/monyxie/inhibitionindicator"
 }

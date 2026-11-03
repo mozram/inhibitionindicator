@@ -106,6 +106,14 @@ export function getInhibitorReason(objectPath: string): Promise<string> {
     ).then((data) => data.get_child_value(0).get_string()[0]);
 }
 
+export function getInhibitorFlags(objectPath: string): Promise<number> {
+    return callSessionManager(
+        objectPath,
+        "org.gnome.SessionManager.Inhibitor",
+        "GetFlags",
+    ).then((data) => data.get_child_value(0).get_uint32());
+}
+
 export function getInhibitorIds(): Promise<string[]> {
     return callSessionManager(
         "/org/gnome/SessionManager",
